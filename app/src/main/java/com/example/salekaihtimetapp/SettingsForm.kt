@@ -1,8 +1,6 @@
 package com.example.salekaihtimetapp
 
-import android.app.Application
 import android.icu.util.TimeZone
-import android.util.Log
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -35,15 +33,28 @@ import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextAlign
-import kotlin.system.exitProcess
+import io.ktor.client.HttpClient
+import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.http.ContentType
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 
+
+const val CLIENT_IP = "192.168.2.228"
+const val CLIENT_PORT = 8080
 
 @RequiresApi(Build.VERSION_CODES.S)
 @Composable
@@ -58,7 +69,13 @@ fun SettingsForm(){
     var durationState by remember{ mutableStateOf("8") }
     var latitudeState by remember { mutableFloatStateOf(63.096F) }
     var longitudeState by remember { mutableFloatStateOf(21.61577F) }
-    var context = LocalContext.current
+    var deviceResponse by remember { mutableStateOf<DeviceResponse?>(null) }
+    val context = LocalContext.current
+
+    if(deviceResponse != null){
+        Toast.makeText(context, deviceResponse!!.msg, Toast.LENGTH_LONG).show()
+        deviceResponse = null
+    }
 
     // Render form if not loading
     if(!loading){
@@ -73,23 +90,33 @@ fun SettingsForm(){
                 setLongitude = {value -> longitudeState = value}
             )
             Divider()
+
             // Force closing time hour:min input
             FormText(name = "Force close time", hint = "Forces curtain to close")
             TimePicker(state = timePickerState, Modifier.padding(0.dp, 20.dp))
             Divider()
+
             // Closing time duration
-            FormText(name = "Close time duration", hint = "Force close duration." )
+            FormText(name = "Close time duration", hint = "Force close duration. Value must be from 1 to 23 and is measured in hours." )
             TextField(
                 modifier = Modifier.padding(0.dp, 20.dp),
                 value=durationState,
-                onValueChange = { newVal -> durationState = newVal},
+                onValueChange = { newVal -> durationState = newVal },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             Divider()
+
             // Upload button
             FormText(name = "Upload settings to curtains.", hint = "Before submitting make sure you are connected via bluetooth.")
             Button(
                 modifier = Modifier.padding(0.dp, 20.dp),
                 onClick = {
+                    // Check duration
+                    val validDuration = validateDuration(durationState)
+                    if(!validDuration){
+                        Toast.makeText(context, "Duration value is invalid. Duration must be integer from 1 to 23.", Toast.LENGTH_LONG).show()
+                        return@Button
+                    }
+
                     // Submit form to backend server.
                     val userSettings = UserSettings(
                         latitudeState.toString(),
@@ -98,27 +125,29 @@ fun SettingsForm(){
                         timePickerState.minute.toString(),
                         durationState
                     )
-
-                    val ok = handleSettingsSubmit({ isLoading -> loading = isLoading }, userSettings)
-
-                    if(ok){
-                        Toast.makeText(context, "Settings uploaded to device successfully.", Toast.LENGTH_SHORT).show()
-                    }else{
-                        Toast.makeText(context, "Failed to upload settings.", Toast.LENGTH_SHORT).show()
+                    // Make post request
+                    val scope = MainScope()
+                    scope.launch(Dispatchers.IO) {
+                        loading = true
+                        val res = handleSettingsSubmit(userSettings)
+                        deviceResponse = res
+                        loading = false
                     }
-                    Thread.sleep(500)
-                    exitProcess(0)
             }) { Text(text = "Upload") }
+
             // Cancel upload connection
             Button(
                 modifier = Modifier.padding(0.dp, 20.dp),
                 colors = ButtonDefaults.buttonColors(Color.Red),
                 onClick = {
-                    handleCancelUpload()
-                    Toast.makeText(context, "No new settings uploaded to device.", Toast.LENGTH_SHORT).show()
-                    Thread.sleep(500)
-                    exitProcess(0)
-                }) { Text(text = "Cancel") }
+                    val scope = MainScope()
+                    scope.launch(Dispatchers.IO){
+                        loading = true
+                        val res = handleCancelUpload()
+                        deviceResponse = res
+                        loading = false
+                    }
+                }) { Text(text = "Close communication") }
         }
     }else{
         // Loading indicator
@@ -143,7 +172,11 @@ private fun Loading(){
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceEvenly
     ){
-        Text("...Uploading...", fontSize = 24.sp, textAlign = TextAlign.Center)
+        CircularProgressIndicator(
+            modifier = Modifier.width(64.dp),
+            color = MaterialTheme.colorScheme.secondary,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+        )
     }
 }
 
@@ -152,8 +185,10 @@ private fun Loading(){
  * Sends new settings with post request.
  * Device is set back to operation mode, closing upload mode and web server.
  * */
-private fun handleSettingsSubmit(onSetLoading: (Boolean) -> Unit, userSettings: UserSettings): Boolean{
-    onSetLoading(true)
+private suspend fun handleSettingsSubmit(userSettings: UserSettings): DeviceResponse{
+    val client = HttpClient()
+    var dResponse = DeviceResponse("New settings uploaded to device. Device connection closed.", HttpStatusCode.OK )
+
     // year, month, day does not matter... These are in local time
     val openLDT = LocalDateTime.of(1980, 7, 10, userSettings.closeTimeHour.toInt(), userSettings.closeTimeMinute.toInt(), 0)
 
@@ -163,15 +198,58 @@ private fun handleSettingsSubmit(onSetLoading: (Boolean) -> Unit, userSettings: 
 
     // Server expects following: close_start=22:00;close_duration=8;latitude=63.096;longitude=21.61577;
     val data = "close_start=${closeUTC.hour}:${closeUTC.minute};close_duration=${userSettings.closeDuration};latitude=${userSettings.latitude};longitude=${userSettings.longitude};"
-    Log.d("USER_DATA", data)
-    onSetLoading(false)
-    return true
+
+    // Do the request
+    try {
+        val response: HttpResponse = client.post("http://$CLIENT_IP:$CLIENT_PORT"){
+            setBody(data)
+            contentType(ContentType.Text.Plain)
+        }
+        if(response.status != HttpStatusCode.OK){
+            dResponse = DeviceResponse.buildBadRequestResponse()
+        }
+
+    }catch (e: ConnectTimeoutException){
+        // Likely not in same network.
+        dResponse = DeviceResponse.buildTimeoutResponse()
+    } finally {
+        client.close()
+    }
+
+    return dResponse
 }
 
 /**
  * Send simple get request to server.
  * Get request changes device mode back to operation, exiting from setup mode and closing web server.
  * */
-private fun handleCancelUpload():Boolean{
-    return true
+private suspend fun handleCancelUpload(): DeviceResponse{
+    val client = HttpClient()
+    var dResponse = DeviceResponse("No new settings uploaded to device. Device connection closed.", HttpStatusCode.OK )
+
+    try {
+        val response: HttpResponse = client.get("http://$CLIENT_IP:$CLIENT_PORT")
+        if(response.status != HttpStatusCode.OK){
+            dResponse = DeviceResponse.buildBadRequestResponse()
+        }
+    } catch (e: ConnectTimeoutException){
+        // Likely not in same network.
+        dResponse = DeviceResponse.buildTimeoutResponse()
+    } finally {
+        client.close()
+    }
+
+    return dResponse
+}
+
+/**
+ * Enforce duration to be in range of 1-23.
+ * */
+private fun validateDuration(duration: String): Boolean{
+    return try {
+        val d = duration.toInt()
+        d in 1..23
+    }catch (e: NumberFormatException){
+        false
+    }
 }
