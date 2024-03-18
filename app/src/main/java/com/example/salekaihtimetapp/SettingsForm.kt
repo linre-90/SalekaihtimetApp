@@ -51,9 +51,10 @@ import io.ktor.http.contentType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
+import java.net.ConnectException
 
 
-const val CLIENT_IP = "192.168.2.228"
+const val CLIENT_IP = "10.42.0.1" // Raspberry
 const val CLIENT_PORT = 8080
 
 @RequiresApi(Build.VERSION_CODES.S)
@@ -64,7 +65,7 @@ const val CLIENT_PORT = 8080
  * */
 fun SettingsForm(){
     // Create states
-    val timePickerState by remember { mutableStateOf(TimePickerState(8, 0, is24Hour = true)) }
+    val timePickerState by remember { mutableStateOf(TimePickerState(22, 0, is24Hour = true)) }
     var loading by remember { mutableStateOf(false) }
     var durationState by remember{ mutableStateOf("8") }
     var latitudeState by remember { mutableFloatStateOf(63.096F) }
@@ -134,20 +135,6 @@ fun SettingsForm(){
                         loading = false
                     }
             }) { Text(text = "Upload") }
-
-            // Cancel upload connection
-            Button(
-                modifier = Modifier.padding(0.dp, 20.dp),
-                colors = ButtonDefaults.buttonColors(Color.Red),
-                onClick = {
-                    val scope = MainScope()
-                    scope.launch(Dispatchers.IO){
-                        loading = true
-                        val res = handleCancelUpload()
-                        deviceResponse = res
-                        loading = false
-                    }
-                }) { Text(text = "Close communication") }
         }
     }else{
         // Loading indicator
@@ -187,7 +174,7 @@ private fun Loading(){
  * */
 private suspend fun handleSettingsSubmit(userSettings: UserSettings): DeviceResponse{
     val client = HttpClient()
-    var dResponse = DeviceResponse("New settings uploaded to device. Device connection closed.", HttpStatusCode.OK )
+    var dResponse = DeviceResponse("New settings uploaded to device.", HttpStatusCode.OK )
 
     // year, month, day does not matter... These are in local time
     val openLDT = LocalDateTime.of(1980, 7, 10, userSettings.closeTimeHour.toInt(), userSettings.closeTimeMinute.toInt(), 0)
@@ -210,32 +197,11 @@ private suspend fun handleSettingsSubmit(userSettings: UserSettings): DeviceResp
         }
 
     }catch (e: ConnectTimeoutException){
-        // Likely not in same network.
         dResponse = DeviceResponse.buildTimeoutResponse()
-    } finally {
-        client.close()
+    }catch (ref: ConnectException){
+        dResponse = DeviceResponse(ref.message.toString(), HttpStatusCode.NotFound)
     }
-
-    return dResponse
-}
-
-/**
- * Send simple get request to server.
- * Get request changes device mode back to operation, exiting from setup mode and closing web server.
- * */
-private suspend fun handleCancelUpload(): DeviceResponse{
-    val client = HttpClient()
-    var dResponse = DeviceResponse("No new settings uploaded to device. Device connection closed.", HttpStatusCode.OK )
-
-    try {
-        val response: HttpResponse = client.get("http://$CLIENT_IP:$CLIENT_PORT")
-        if(response.status != HttpStatusCode.OK){
-            dResponse = DeviceResponse.buildBadRequestResponse()
-        }
-    } catch (e: ConnectTimeoutException){
-        // Likely not in same network.
-        dResponse = DeviceResponse.buildTimeoutResponse()
-    } finally {
+    finally {
         client.close()
     }
 
