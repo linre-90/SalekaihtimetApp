@@ -107,7 +107,7 @@ fun SettingsForm(){
             Divider()
 
             // Upload button
-            FormText(name = "Upload settings to curtains.", hint = "Before submitting make sure you are connected via bluetooth.")
+            FormText(name = "Upload settings to curtains.", hint = "Before submitting make sure you are connected via wifi.")
             Button(
                 modifier = Modifier.padding(0.dp, 20.dp),
                 onClick = {
