@@ -3,6 +3,7 @@ package com.example.salekaihtimetapp
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.util.Log
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
@@ -35,7 +36,21 @@ fun LocationSelector(setLatitude: (Float) -> Unit, setLongitude: (Float) -> Unit
     )
     var findingLocation by remember { mutableStateOf(false) }
     var locationMsg by remember { mutableStateOf("") }
+    var firstLocation by remember { mutableStateOf(true) }
     val context = LocalContext.current
+
+    if(locationPermission.allPermissionsGranted && firstLocation){
+        // Start updating location if permissions are already granted.
+        queryLocation(
+            context =  context,
+            onFindingLocation = { newVal -> findingLocation = newVal },
+            setLocatingStatus = {newVal -> locationMsg = newVal},
+            updateLatitude = {lat -> setLatitude(lat)},
+            updateLongitude = {lat -> setLongitude(lat)},
+        )
+        firstLocation = false
+    }
+
 
     // Button to start user locating
     Button(
@@ -45,6 +60,7 @@ fun LocationSelector(setLatitude: (Float) -> Unit, setLongitude: (Float) -> Unit
             if (!locationPermission.allPermissionsGranted) {
                 locationPermission.launchMultiplePermissionRequest()
             } else {
+                // Manually query location when btn is pressed.
                 queryLocation(
                     context =  context,
                     onFindingLocation = { newVal -> findingLocation = newVal },
@@ -77,7 +93,6 @@ fun queryLocation(
 ){
     onFindingLocation(true)
     val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
-
     fusedLocationClient.getCurrentLocation( Priority.PRIORITY_HIGH_ACCURACY, CancellationTokenSource().token)
         .addOnSuccessListener {
             if(it != null){
